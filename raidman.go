@@ -1,4 +1,6 @@
 // Go Riemann client
+//
+// TODO(cloudhead): pbEventsToEvents should parse Attributes field
 package raidman
 
 import (
@@ -175,7 +177,7 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 				f := t.FieldByName(name)
 				attrs := []*proto.Attribute{}
 				for k, v := range value.Interface().(map[string]string) {
-					attrs = append(attrs, &proto.Attribute{Key: &k, Value: &v})
+					attrs = append(attrs, &proto.Attribute{Key: pb.String(k), Value: pb.String(v)})
 				}
 				f.Set(reflect.ValueOf(attrs))
 			}
