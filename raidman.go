@@ -42,7 +42,7 @@ type Event struct {
 	State       string
 	Service     string
 	Metric      interface{} // Could be Int, Float32, Float64
-	Attributes  map[string]string
+	Attributes  map[string]interface{}
 	Description string
 }
 
@@ -176,8 +176,15 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 			case "Attributes":
 				f := t.FieldByName(name)
 				attrs := []*proto.Attribute{}
-				for k, v := range value.Interface().(map[string]string) {
-					attrs = append(attrs, &proto.Attribute{Key: pb.String(k), Value: pb.String(v)})
+				for k, v := range value.Interface().(map[string]interface{}) {
+					switch v.(type) {
+					case string:
+						attrs = append(attrs, &proto.Attribute{Key: pb.String(k), Value: pb.String(v.(string))})
+					case bool:
+						attrs = append(attrs, &proto.Attribute{Key: pb.String(k)})
+					default:
+						return nil, fmt.Errorf("Attribute value of invalid type (type %v)", reflect.TypeOf(v))
+					}
 				}
 				f.Set(reflect.ValueOf(attrs))
 			}
