@@ -1,4 +1,6 @@
 // Go Riemann client
+//
+// TODO(cloudhead): pbEventsToEvents should parse Attributes field
 package raidman
 
 import (
@@ -40,6 +42,7 @@ type Event struct {
 	State       string
 	Service     string
 	Metric      interface{} // Could be Int, Float32, Float64
+	Attributes  map[string]interface{}
 	Description string
 }
 
@@ -157,6 +160,9 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 				case reflect.Int:
 					tmp := reflect.ValueOf(pb.Int64(int64(value.Int())))
 					t.FieldByName("MetricSint64").Set(tmp)
+				case reflect.Int64:
+					tmp := reflect.ValueOf(pb.Int64(value.Int()))
+					t.FieldByName("MetricSint64").Set(tmp)
 				case reflect.Float32:
 					tmp := reflect.ValueOf(pb.Float32(float32(value.Float())))
 					t.FieldByName("MetricF").Set(tmp)
@@ -167,6 +173,20 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 					return nil, fmt.Errorf("Metric of invalid type (type %v)",
 						reflect.TypeOf(f.Interface()).Kind())
 				}
+			case "Attributes":
+				f := t.FieldByName(name)
+				attrs := []*proto.Attribute{}
+				for k, v := range value.Interface().(map[string]interface{}) {
+					switch v.(type) {
+					case string:
+						attrs = append(attrs, &proto.Attribute{Key: pb.String(k), Value: pb.String(v.(string))})
+					case bool:
+						attrs = append(attrs, &proto.Attribute{Key: pb.String(k)})
+					default:
+						return nil, fmt.Errorf("Attribute value of invalid type (type %v)", reflect.TypeOf(v))
+					}
+				}
+				f.Set(reflect.ValueOf(attrs))
 			}
 		}
 	}
