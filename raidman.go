@@ -11,7 +11,6 @@ import (
 	"io"
 	"net"
 	"os"
-	"reflect"
 	"sync"
 
 	pb "code.google.com/p/goprotobuf/proto"
@@ -131,67 +130,76 @@ func (network *udp) Send(message *proto.Msg, conn net.Conn) (*proto.Msg, error) 
 func eventToPbEvent(event *Event) (*proto.Event, error) {
 	var e proto.Event
 
+	h := event.Host
 	if event.Host == "" {
-		event.Host, _ = os.Hostname()
+		h, _ = os.Hostname()
 	}
-	t := reflect.ValueOf(&e).Elem()
-	s := reflect.ValueOf(event).Elem()
-	typeOfEvent := s.Type()
-	for i := 0; i < s.NumField(); i++ {
-		f := s.Field(i)
-		value := reflect.ValueOf(f.Interface())
-		if reflect.Zero(f.Type()) != value && f.Interface() != nil {
-			name := typeOfEvent.Field(i).Name
-			switch name {
-			case "State", "Service", "Host", "Description":
-				tmp := reflect.ValueOf(pb.String(value.String()))
-				t.FieldByName(name).Set(tmp)
-			case "Ttl":
-				tmp := reflect.ValueOf(pb.Float32(float32(value.Float())))
-				t.FieldByName(name).Set(tmp)
-			case "Time":
-				tmp := reflect.ValueOf(pb.Int64(value.Int()))
-				t.FieldByName(name).Set(tmp)
-			case "Tags":
-				tmp := reflect.ValueOf(value.Interface().([]string))
-				t.FieldByName(name).Set(tmp)
-			case "Metric":
-				switch reflect.TypeOf(f.Interface()).Kind() {
-				case reflect.Int:
-					tmp := reflect.ValueOf(pb.Int64(int64(value.Int())))
-					t.FieldByName("MetricSint64").Set(tmp)
-				case reflect.Int64:
-					tmp := reflect.ValueOf(pb.Int64(value.Int()))
-					t.FieldByName("MetricSint64").Set(tmp)
-				case reflect.Float32:
-					tmp := reflect.ValueOf(pb.Float32(float32(value.Float())))
-					t.FieldByName("MetricF").Set(tmp)
-				case reflect.Float64:
-					tmp := reflect.ValueOf(pb.Float64(value.Float()))
-					t.FieldByName("MetricD").Set(tmp)
-				default:
-					return nil, fmt.Errorf("Metric of invalid type (type %v)",
-						reflect.TypeOf(f.Interface()).Kind())
-				}
-			case "Attributes":
-				f := t.FieldByName(name)
-				attrs := []*proto.Attribute{}
-				for k, v := range value.Interface().(map[string]interface{}) {
-					switch v.(type) {
-					case string:
-						attrs = append(attrs, &proto.Attribute{Key: pb.String(k), Value: pb.String(v.(string))})
-					case bool:
-						attrs = append(attrs, &proto.Attribute{Key: pb.String(k)})
-					default:
-						return nil, fmt.Errorf("Attribute value of invalid type (type %v)", reflect.TypeOf(v))
-					}
-				}
-				f.Set(reflect.ValueOf(attrs))
+	e.Host = &h
+
+	if event.State != "" {
+		e.State = &event.State
+	}
+	if event.Service != "" {
+		e.Service = &event.Service
+	}
+	if event.Description != "" {
+		e.Description = &event.Description
+	}
+	if event.Ttl != 0 {
+		e.Ttl = &event.Ttl
+	}
+	if event.Time != 0 {
+		e.Time = &event.Time
+	}
+	if len(event.Tags) > 0 {
+		e.Tags = event.Tags
+	}
+
+	err := assignEventMetric(&e, event.Metric)
+	if err != nil {
+		return nil, err
+	}
+
+	attrs := make([]proto.Attribute, len(event.Attributes))
+	i := 0
+	for k, v := range event.Attributes {
+		switch x := v.(type) {
+		case string:
+			attrs[i].Key = &k
+			attrs[i].Value = &x
+		case bool:
+			if x {
+				attrs[i].Key = &k
 			}
+		default:
+			return nil, fmt.Errorf("Attribute %v has invalid type (type %T)", k, v)
 		}
+		i++
 	}
 
 	return &e, nil
+}
+
+func assignEventMetric(e *proto.Event, v interface{}) error {
+	switch x := v.(type) {
+	case nil:
+		// do nothing; an event without a metric is legitimate
+	case int:
+		i := int64(x)
+		e.MetricSint64 = &i
+	case int32:
+		i := int64(x)
+		e.MetricSint64 = &i
+	case int64:
+		e.MetricSint64 = &x
+	case float32:
+		e.MetricF = &x
+	case float64:
+		e.MetricD = &x
+	default:
+		return fmt.Errorf("Metric of invalid type (type %T)", v)
+	}
+	return nil
 }
 
 func pbEventsToEvents(pbEvents []*proto.Event) []Event {
