@@ -17,19 +17,10 @@ import (
 	"github.com/swdunlop/raidman/proto"
 )
 
-type network interface {
-	Send(message *proto.Msg, conn net.Conn) (*proto.Msg, error)
-}
-
-type tcp struct{}
-
-type udp struct{}
-
 // Client represents a connection to a Riemann server
 type Client struct {
 	sync.Mutex
-	net        network
-	connection net.Conn
+	transport Transport
 }
 
 // An Event represents a single Riemann event
@@ -49,82 +40,21 @@ type Event struct {
 // netwrk.
 //
 // Known networks are "tcp", "tcp4", "tcp6", "udp", "udp4", and "udp6".
-func Dial(netwrk, addr string) (c *Client, err error) {
-	c = new(Client)
+func Dial(network, addr string) (*Client, error) {
+	client := &Client{}
+	rwc, err := net.Dial(network, addr)
+	if err != nil {
+		return nil, err
+	}
 
-	var cnet network
-	switch netwrk {
-	case "tcp", "tcp4", "tcp6":
-		cnet = new(tcp)
+	switch network {
 	case "udp", "udp4", "udp6":
-		cnet = new(udp)
+		client.transport = &UdpTransport{rwc}
 	default:
-		return nil, fmt.Errorf("dial %q: unsupported network %q", netwrk, netwrk)
+		client.transport = &TcpTransport{rwc}
 	}
 
-	c.net = cnet
-	c.connection, err = net.Dial(netwrk, addr)
-	if err != nil {
-		return nil, err
-	}
-
-	return c, nil
-}
-
-func (network *tcp) Send(message *proto.Msg, conn net.Conn) (*proto.Msg, error) {
-	msg := &proto.Msg{}
-	data, err := pb.Marshal(message)
-	if err != nil {
-		return msg, err
-	}
-	b := new(bytes.Buffer)
-	if err = binary.Write(b, binary.BigEndian, uint32(len(data))); err != nil {
-		return msg, err
-	}
-	if _, err = conn.Write(b.Bytes()); err != nil {
-		return msg, err
-	}
-	if _, err = conn.Write(data); err != nil {
-		return msg, err
-	}
-	var header uint32
-	if err = binary.Read(conn, binary.BigEndian, &header); err != nil {
-		return msg, err
-	}
-	response := make([]byte, header)
-	if err = readFully(conn, response); err != nil {
-		return msg, err
-	}
-	if err = pb.Unmarshal(response, msg); err != nil {
-		return msg, err
-	}
-	if msg.GetOk() != true {
-		return msg, errors.New(msg.GetError())
-	}
-	return msg, nil
-}
-
-func readFully(r io.Reader, p []byte) error {
-	for len(p) > 0 {
-		n, err := r.Read(p)
-		p = p[n:]
-		if err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func (network *udp) Send(message *proto.Msg, conn net.Conn) (*proto.Msg, error) {
-	data, err := pb.Marshal(message)
-	if err != nil {
-		return nil, err
-	}
-	if _, err = conn.Write(data); err != nil {
-		return nil, err
-	}
-
-	return nil, nil
+	return client, nil
 }
 
 func eventToPbEvent(event *Event) (*proto.Event, error) {
@@ -202,6 +132,63 @@ func assignEventMetric(e *proto.Event, v interface{}) error {
 	return nil
 }
 
+// Send sends an event to Riemann and waits for an acknowledgement, if a TCP client was used.
+func (c *Client) Send(event *Event) error {
+	c.Lock()
+	defer c.Unlock()
+
+	evt, err := eventToPbEvent(event)
+	if err != nil {
+		return err
+	}
+
+	req := &proto.Msg{Events: []*proto.Event{evt}}
+	err = c.transport.WriteMsg(req)
+	switch {
+	case err != nil:
+		return err
+	case c.isUsingUdp():
+		return nil
+	}
+
+	_, err = c.transport.ReadMsg()
+	return err
+}
+
+// Query returns a list of events matched by query; Query cannot be used with UDP clients.
+func (c *Client) Query(q string) ([]Event, error) {
+	c.Lock()
+	defer c.Unlock()
+
+	if c.isUsingUdp() {
+		return nil, errors.New("Querying over UDP is not supported")
+	}
+
+	req := &proto.Msg{Query: &proto.Query{String_: pb.String(q)}}
+	err := c.transport.WriteMsg(req)
+	if err != nil {
+		return nil, err
+	}
+
+	rsp, err := c.transport.ReadMsg()
+	if err != nil {
+		return nil, err
+	}
+	return pbEventsToEvents(rsp.GetEvents()), nil
+}
+
+func (c *Client) isUsingUdp() bool {
+	_, yes := c.transport.(*UdpTransport)
+	return yes
+}
+
+// Close closes the connection to Riemann
+func (c *Client) Close() error {
+	c.Lock()
+	defer c.Unlock()
+	return c.transport.Close()
+}
+
 func pbEventsToEvents(pbEvents []*proto.Event) []Event {
 	var events []Event
 
@@ -229,46 +216,98 @@ func pbEventsToEvents(pbEvents []*proto.Event) []Event {
 	return events
 }
 
-// Send sends an event to Riemann
-func (c *Client) Send(event *Event) error {
-	e, err := eventToPbEvent(event)
-	if err != nil {
-		return err
-	}
-	message := &proto.Msg{}
-	message.Events = append(message.Events, e)
-	c.Lock()
-	defer c.Unlock()
-	_, err = c.net.Send(message, c.connection)
-	if err != nil {
-		return err
-	}
-
-	return nil
+type Transport interface {
+	WriteMsg(msg *proto.Msg) error
+	ReadMsg() (*proto.Msg, error)
+	Close() error
 }
 
-// Query returns a list of events matched by query
-func (c *Client) Query(q string) ([]Event, error) {
-	switch c.net.(type) {
-	case *udp:
-		return nil, errors.New("Querying over UDP is not supported")
+type TcpTransport struct {
+	rwc io.ReadWriteCloser
+}
+
+var _ Transport = &TcpTransport{}
+
+func (tp *TcpTransport) WriteMsg(msg *proto.Msg) error {
+	data, err := pb.Marshal(msg)
+	if err != nil {
+		return err
 	}
-	query := &proto.Query{}
-	query.String_ = pb.String(q)
-	message := &proto.Msg{}
-	message.Query = query
-	c.Lock()
-	defer c.Unlock()
-	response, err := c.net.Send(message, c.connection)
+
+	sz := len(data)
+	buf := bytes.NewBuffer(make([]byte, 0, sz+4))
+	binary.Write(buf, binary.BigEndian, uint32(sz))
+	buf.Write(data)
+	_, err = tp.rwc.Write(buf.Bytes())
+	return err
+}
+
+func (tp *TcpTransport) ReadMsg() (*proto.Msg, error) {
+	var sz uint32
+	err := binary.Read(tp.rwc, binary.BigEndian, &sz)
 	if err != nil {
 		return nil, err
 	}
-	return pbEventsToEvents(response.GetEvents()), nil
+	p := make([]byte, sz)
+	err = readFully(tp.rwc, p)
+	if err != nil {
+		return nil, err
+	}
+
+	msg := new(proto.Msg)
+	err = pb.Unmarshal(p, msg)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
 }
 
-// Close closes the connection to Riemann
-func (c *Client) Close() {
-	c.Lock()
-	c.connection.Close()
-	c.Unlock()
+func (tp *TcpTransport) Close() error {
+	return tp.rwc.Close()
+}
+
+type UdpTransport struct {
+	rwc io.ReadWriteCloser
+}
+
+var _ Transport = &UdpTransport{}
+
+func (tp *UdpTransport) WriteMsg(msg *proto.Msg) error {
+	data, err := pb.Marshal(msg)
+	if err != nil {
+		return err
+	}
+	_, err = tp.rwc.Write(data)
+	return err
+}
+
+func (tp *UdpTransport) ReadMsg() (*proto.Msg, error) {
+	p := make([]byte, 1<<16) // max udp data size is less than 64k
+	n, err := tp.rwc.Read(p)
+	if err != nil {
+		return nil, err
+	}
+	p = p[:n]
+
+	msg := new(proto.Msg)
+	err = pb.Unmarshal(p, msg)
+	if err != nil {
+		return nil, err
+	}
+	return msg, nil
+}
+
+func (tp *UdpTransport) Close() error {
+	return tp.rwc.Close()
+}
+
+func readFully(r io.Reader, p []byte) error {
+	for len(p) > 0 {
+		n, err := r.Read(p)
+		p = p[n:]
+		if err != nil {
+			return err
+		}
+	}
+	return nil
 }
