@@ -17,6 +17,11 @@ import (
 	"github.com/swdunlop/raidman/proto"
 )
 
+// Wraps client state around a riemann Transport.
+func WrapClient(transport Transport) *Client {
+	return &Client{transport: transport}
+}
+
 // Client represents a connection to a Riemann server
 type Client struct {
 	sync.Mutex
@@ -57,6 +62,7 @@ func Dial(network, addr string) (*Client, error) {
 	return client, nil
 }
 
+// eventToPbEvent translates a raidman.Event into a lowlevel protocol Event.
 func eventToPbEvent(event *Event) (*proto.Event, error) {
 	var e proto.Event
 
@@ -110,6 +116,7 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 	return &e, nil
 }
 
+// assignEventMetric updates the "Metric" fields of the underlying protobuf Event type based on the type of value provided
 func assignEventMetric(e *proto.Event, v interface{}) error {
 	switch x := v.(type) {
 	case nil:
@@ -177,6 +184,7 @@ func (c *Client) Query(q string) ([]Event, error) {
 	return pbEventsToEvents(rsp.GetEvents()), nil
 }
 
+// isUsingUdp checks to see if the client is using a UDP transport; the UDP transport in Riemann is only partially functional, providing one way sends of events without waiting for acknowledgement
 func (c *Client) isUsingUdp() bool {
 	_, yes := c.transport.(*UdpTransport)
 	return yes
@@ -189,6 +197,7 @@ func (c *Client) Close() error {
 	return c.transport.Close()
 }
 
+// pbEventsToEvents converts a slice of low level protobuf events into raidman events.
 func pbEventsToEvents(pbEvents []*proto.Event) []Event {
 	var events []Event
 
@@ -216,18 +225,21 @@ func pbEventsToEvents(pbEvents []*proto.Event) []Event {
 	return events
 }
 
+// A Transport provides a means of writing and reading messages to a Riemann client or server.  Transport is implemented by TcpTransport and UdpTransport, and wrapped by Clients.  Transports should not worry about synchronization -- Clients use a mutex for this purpose.
 type Transport interface {
 	WriteMsg(msg *proto.Msg) error
 	ReadMsg() (*proto.Msg, error)
 	Close() error
 }
 
+// TcpTransport implements Transport using an underlying TCP connection, with each protobuf message prefaced with a big-endian 32-bit length.
 type TcpTransport struct {
 	rwc io.ReadWriteCloser
 }
 
 var _ Transport = &TcpTransport{}
 
+// WriteMsg is an implementation of Transport.
 func (tp *TcpTransport) WriteMsg(msg *proto.Msg) error {
 	data, err := pb.Marshal(msg)
 	if err != nil {
@@ -242,6 +254,7 @@ func (tp *TcpTransport) WriteMsg(msg *proto.Msg) error {
 	return err
 }
 
+// ReadMsg is an implementation of Transport.
 func (tp *TcpTransport) ReadMsg() (*proto.Msg, error) {
 	var sz uint32
 	err := binary.Read(tp.rwc, binary.BigEndian, &sz)
@@ -262,16 +275,19 @@ func (tp *TcpTransport) ReadMsg() (*proto.Msg, error) {
 	return msg, nil
 }
 
+// Close is an implementation of io.Closer and Transport that forwards to the underlying connection.
 func (tp *TcpTransport) Close() error {
 	return tp.rwc.Close()
 }
 
+// UdpTransport implements Transport using an underlying UDP connection, with each protobuf message occuping one datagram.  Note that this limits the maximum message length to ~63k, due to the limit in UDP datagram sizes.  UdpTransports should only be used for cases of very high frequency metrics with limited descriptions and attributes.
 type UdpTransport struct {
 	rwc io.ReadWriteCloser
 }
 
 var _ Transport = &UdpTransport{}
 
+// WriteMsg is an implementation of Transport.
 func (tp *UdpTransport) WriteMsg(msg *proto.Msg) error {
 	data, err := pb.Marshal(msg)
 	if err != nil {
@@ -281,6 +297,7 @@ func (tp *UdpTransport) WriteMsg(msg *proto.Msg) error {
 	return err
 }
 
+// ReadMsg is an implementation of Transport.
 func (tp *UdpTransport) ReadMsg() (*proto.Msg, error) {
 	p := make([]byte, 1<<16) // max udp data size is less than 64k
 	n, err := tp.rwc.Read(p)
@@ -297,6 +314,7 @@ func (tp *UdpTransport) ReadMsg() (*proto.Msg, error) {
 	return msg, nil
 }
 
+// Close is an implementation of io.Closer and Transport that forwards to the underlying socket.
 func (tp *UdpTransport) Close() error {
 	return tp.rwc.Close()
 }
