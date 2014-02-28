@@ -95,13 +95,13 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 		return nil, err
 	}
 
-	attrs := make([]proto.Attribute, len(event.Attributes))
+	attrs := make([]*proto.Attribute, len(event.Attributes))
 	i := 0
 	for k, v := range event.Attributes {
 		switch x := v.(type) {
 		case string:
-			attrs[i].Key = &k
-			attrs[i].Value = &x
+			w := v.(string)
+			attrs[i] = &proto.Attribute{&k, &w, nil}
 		case bool:
 			if x {
 				attrs[i].Key = &k
@@ -110,6 +110,10 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 			return nil, fmt.Errorf("Attribute %v has invalid type (type %T)", k, v)
 		}
 		i++
+	}
+
+	if i > 0 {
+		e.Attributes = attrs
 	}
 
 	return &e, nil
