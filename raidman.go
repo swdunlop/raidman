@@ -11,8 +11,9 @@ import (
 	"net"
 	"os"
 	"sync"
+	"time"
 
-	pb "code.google.com/p/goprotobuf/proto"
+	pb "github.com/golang/protobuf/proto"
 	"github.com/swdunlop/raidman/proto"
 )
 
@@ -36,29 +37,41 @@ type Event struct {
 	State       string
 	Service     string
 	Metric      interface{} // Could be Int, Float32, Float64
-	Attributes  map[string]interface{}
+	Attributes  map[string]string
 	Description string
 }
 
-// Dial establishes a connection to a Riemann server at addr, on the network
-// netwrk.
-//
-// Known networks are "tcp", "tcp4", "tcp6", "udp", "udp4", and "udp6".
+// Dial establishes a connection to a Riemann server using the specified network
+// transport.  Supported transports: "tcp", "tcp4", "tcp6", "udp", "udp4", and "udp6".
 func Dial(network, addr string) (*Client, error) {
-	client := &Client{}
-	rwc, err := net.Dial(network, addr)
-	if err != nil {
-		return nil, err
-	}
+	return DialTimeout(network, addr, 0)
+}
+
+// DialTimeout establishes a connection to a Riemann server, as described in Dial.  If
+// timeout is nonzero, the attempt will give up earlier than the OS imposed limit.
+func DialTimeout(network, addr string, timeout time.Duration) (*Client, error) {
+	c := new(Client)
 
 	switch network {
 	case "udp", "udp4", "udp6":
-		client.transport = &UdpTransport{rwc}
+		rwc, err := net.DialTimeout(network, addr, timeout)
+		if err != nil {
+			return nil, err
+		}
+		c.transport = &UdpTransport{rwc}
+
+	case "tcp", "tcp4", "tcp6":
+		rwc, err := net.DialTimeout(network, addr, timeout)
+		if err != nil {
+			return nil, err
+		}
+		c.transport = &TcpTransport{rwc}
+
 	default:
-		client.transport = &TcpTransport{rwc}
+		return nil, fmt.Errorf("dial %q: unsupported network %q", network, network)
 	}
 
-	return client, nil
+	return c, nil
 }
 
 // eventToPbEvent translates a raidman.Event into a lowlevel protocol Event.
@@ -95,27 +108,20 @@ func eventToPbEvent(event *Event) (*proto.Event, error) {
 		return nil, err
 	}
 
-	attrs := make([]*proto.Attribute, len(event.Attributes))
-	i := 0
+	if len(event.Attributes) < 1 {
+		return &e, nil
+	}
+
+	attrs := make([]*proto.Attribute, 0, len(event.Attributes))
 	for k, v := range event.Attributes {
-		switch x := v.(type) {
-		case string:
-			w := v.(string)
-			attrs[i] = &proto.Attribute{&k, &w, nil}
-		case bool:
-			if x {
-				attrs[i].Key = &k
-			}
-		default:
-			return nil, fmt.Errorf("Attribute %v has invalid type (type %T)", k, v)
+		attr := &proto.Attribute{Key: &k}
+		if v != `` {
+			attr.Value = &v
 		}
-		i++
+		attrs = append(attrs, attr)
 	}
 
-	if i > 0 {
-		e.Attributes = attrs
-	}
-
+	e.Attributes = attrs
 	return &e, nil
 }
 
@@ -221,12 +227,14 @@ func pbEventsToEvents(pbEvents []*proto.Event) []Event {
 		} else {
 			e.Metric = event.GetMetricSint64()
 		}
-
-		e.Attributes = make(map[string]interface{})
+		e.Attributes = make(map[string]string)
 		pbAttributes := event.GetAttributes()
 		for _, pbAttribute := range pbAttributes {
-			//fmt.Println("We found an attribute")
-			e.Attributes[*pbAttribute.Key] = pbAttribute.Value
+			val := ``
+			if pbAttribute.Value != nil {
+				val = *pbAttribute.Value
+			}
+			e.Attributes[*pbAttribute.Key] = val
 		}
 
 		events = append(events, e)
@@ -268,6 +276,7 @@ func (tp *TcpTransport) WriteMsg(msg *proto.Msg) error {
 func (tp *TcpTransport) ReadMsg() (*proto.Msg, error) {
 	var sz uint32
 	err := binary.Read(tp.rwc, binary.BigEndian, &sz)
+
 	if err != nil {
 		return nil, err
 	}
