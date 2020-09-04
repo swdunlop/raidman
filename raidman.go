@@ -74,6 +74,18 @@ func DialTimeout(network, addr string, timeout time.Duration) (*Client, error) {
 	return c, nil
 }
 
+// WrapTCPConn provides a means for users who can't use Dial, or don't want a Client, to
+// build their own TcpTransport.
+func WrapTCPConn(conn *net.TCPConn) (TcpTransport) {
+	return TcpTransport{conn}
+}
+
+// WrapUDPConn provides a means for users who can't use Dial, or don't want a Client, to
+// build their own UdpTransport.
+func WrapUDPConn(conn *net.UDPConn) (UdpTransport) {
+	return UdpTransport{conn}
+}
+
 // eventToPbEvent translates a raidman.Event into a lowlevel protocol Event.
 func eventToPbEvent(event *Event) (*proto.Event, error) {
 	var e proto.Event
